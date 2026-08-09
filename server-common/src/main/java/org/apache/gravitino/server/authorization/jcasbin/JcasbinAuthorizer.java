@@ -541,11 +541,15 @@ public class JcasbinAuthorizer implements GravitinoAuthorizer {
       return true;
     }
 
+    // Owning any object in the chain is sufficient, provided the usage permission on that object's
+    // parent is satisfied. A match at a lower level must not short-circuit the walk: otherwise
+    // owning both a schema and its catalog is denied, while owning only the catalog is allowed.
     MetadataObject metadataObject = MetadataObjects.parse(fullName, metadataType);
     do {
-      if (isOwner(currentPrincipal, metalake, metadataObject, requestContext)) {
-        return hasParentUsagePermission(
-            currentPrincipal, metalake, metadataObject, metalakeObject, requestContext);
+      if (isOwner(currentPrincipal, metalake, metadataObject, requestContext)
+          && hasParentUsagePermission(
+              currentPrincipal, metalake, metadataObject, metalakeObject, requestContext)) {
+        return true;
       }
     } while ((metadataObject = MetadataObjects.parent(metadataObject)) != null);
     return false;

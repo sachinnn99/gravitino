@@ -120,6 +120,12 @@ public class TestJcasbinAuthorizer {
 
   private static final Long CATALOG_ID = 4L;
 
+  /** Schema-level metadata id, used by cases that need ownership per level (see #12269). */
+  private static final Long SCHEMA_ID = 7L;
+
+  /** Metalake-level metadata id, used by cases that need ownership per level (see #12269). */
+  private static final Long METALAKE_OBJECT_ID = 8L;
+
   private static final String USERNAME = "tester";
 
   private static final String METALAKE = "testMetalake";
@@ -2303,6 +2309,116 @@ public class TestJcasbinAuthorizer {
         jcasbinAuthorizer.hasSetOwnerPermission(
             METALAKE, "CATALOG", "testCatalog", new AuthorizationRequestContext()),
         "Catalog owner should be able to set owner without checking DENY USE_CATALOG");
+  }
+
+  @Test
+  public void testHasSetOwnerPermissionAllowsOwnerOfBothCatalogAndSchema() throws Exception {
+    makeCompletableFutureUseCurrentThread(jcasbinAuthorizer);
+
+    // The user owns the schema and its parent catalog, and holds no explicit USE_CATALOG.
+    withPerTypeMetadataIds(
+        () -> {
+          GravitinoCache<Long, Optional<OwnerInfo>> ownerRelCache =
+              getOwnerRelCache(jcasbinAuthorizer);
+          ownerRelCache.invalidateAll();
+          ownerRelCache.put(SCHEMA_ID, Optional.of(new OwnerInfo(USER_ID, "USER")));
+          ownerRelCache.put(CATALOG_ID, Optional.of(new OwnerInfo(USER_ID, "USER")));
+
+          assertTrue(
+              jcasbinAuthorizer.hasSetOwnerPermission(
+                  METALAKE, "SCHEMA", "testCatalog.testSchema", new AuthorizationRequestContext()),
+              "Owning both the schema and its catalog should be allowed, "
+                  + "just as owning only the catalog is");
+        });
+  }
+
+  @Test
+  public void testHasSetOwnerPermissionAllowsCatalogOwnerForSchema() throws Exception {
+    makeCompletableFutureUseCurrentThread(jcasbinAuthorizer);
+
+    // Baseline the case above must stay consistent with: the user owns only the parent catalog.
+    withPerTypeMetadataIds(
+        () -> {
+          GravitinoCache<Long, Optional<OwnerInfo>> ownerRelCache =
+              getOwnerRelCache(jcasbinAuthorizer);
+          ownerRelCache.invalidateAll();
+          ownerRelCache.put(CATALOG_ID, Optional.of(new OwnerInfo(USER_ID, "USER")));
+
+          assertTrue(
+              jcasbinAuthorizer.hasSetOwnerPermission(
+                  METALAKE, "SCHEMA", "testCatalog.testSchema", new AuthorizationRequestContext()),
+              "Catalog owner should be able to set owner on a schema under it");
+        });
+  }
+
+  @Test
+  public void testHasSetOwnerPermissionRejectsSchemaOwnerWithoutUseCatalog() throws Exception {
+    makeCompletableFutureUseCurrentThread(jcasbinAuthorizer);
+
+    // Owning only the schema still requires USE_CATALOG on the parent; walking up the chain must
+    // not turn this into an allow.
+    withPerTypeMetadataIds(
+        () -> {
+          GravitinoCache<Long, Optional<OwnerInfo>> ownerRelCache =
+              getOwnerRelCache(jcasbinAuthorizer);
+          ownerRelCache.invalidateAll();
+          ownerRelCache.put(SCHEMA_ID, Optional.of(new OwnerInfo(USER_ID, "USER")));
+
+          assertFalse(
+              jcasbinAuthorizer.hasSetOwnerPermission(
+                  METALAKE, "SCHEMA", "testCatalog.testSchema", new AuthorizationRequestContext()),
+              "Schema owner without USE_CATALOG on the parent catalog should be denied");
+        });
+  }
+
+  /**
+   * Runs {@code body} with {@link MetadataIdConverter#getID} resolving each metadata object to an
+   * id derived from its type, instead of the shared {@link #CATALOG_ID} used by the other cases.
+   *
+   * <p>Owner lookups are cached per metadata id, so distinct ids per level are what let a case
+   * express ownership of a schema separately from ownership of its catalog. The class-wide stub is
+   * restored afterwards.
+   *
+   * @param body the assertions to run under the per-type id stub
+   * @throws Exception if {@code body} throws
+   */
+  private static void withPerTypeMetadataIds(ThrowingRunnable body) throws Exception {
+    metadataIdConverterMockedStatic
+        .when(() -> MetadataIdConverter.getID(any(), eq(METALAKE)))
+        .thenAnswer(
+            invocation -> {
+              MetadataObject metadataObject = invocation.getArgument(0);
+              switch (metadataObject.type()) {
+                case SCHEMA:
+                  return Optional.of(SCHEMA_ID);
+                case CATALOG:
+                  return Optional.of(CATALOG_ID);
+                case METALAKE:
+                  return Optional.of(METALAKE_OBJECT_ID);
+                default:
+                  return Optional.of(CATALOG_ID);
+              }
+            });
+    try {
+      body.run();
+    } finally {
+      metadataIdConverterMockedStatic
+          .when(() -> MetadataIdConverter.getID(any(), eq(METALAKE)))
+          .thenReturn(Optional.of(CATALOG_ID));
+    }
+  }
+
+  /**
+   * A body of assertions that is allowed to throw, for use with {@link #withPerTypeMetadataIds}.
+   */
+  @FunctionalInterface
+  private interface ThrowingRunnable {
+    /**
+     * Runs the body.
+     *
+     * @throws Exception if the body fails
+     */
+    void run() throws Exception;
   }
 
   /**
